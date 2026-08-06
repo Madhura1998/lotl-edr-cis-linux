@@ -1,0 +1,120 @@
+from typing import Dict, Any, Set, Optional
+from lotl_edr.correlator.models import AttackChain
+from lotl_edr.risk_engine.engine import RiskEngine
+from lotl_edr.utils.logger import setup_logger
+
+logger = setup_logger("confidence_engine")
+
+class ConfidenceEngine:
+    def __init__(self, risk_engine: RiskEngine, drift_detector: Optional[Any] = None):
+        self.risk_engine = risk_engine
+        self.drift_detector = drift_detector
+
+    def calculate_confidence(self, chain: AttackChain) -> Dict[str, Any]:
+        """
+        Evaluates an AttackChain and calculates its overall conviction/confidence score (0-100).
+        """
+        if not chain.events:
+            return {
+                "confidence_score": 0.0,
+                "tier": "Monitor",
+                "should_contain": False,
+                "breakdown": {}
+            }
+
+        # 1. Telemetry Sources Diversity Contribution (Max 40)
+        unique_sources: Set[str] = {ev.source for ev in chain.events if ev.source}
+        src_count = len(unique_sources)
+        if src_count >= 3:
+            sources_score = 40.0
+        elif src_count == 2:
+            sources_score = 25.0
+        elif src_count == 1:
+            sources_score = 10.0
+        else:
+            sources_score = 0.0
+
+        # 2. MITRE Tactics Diversity Contribution (Max 40)
+        # FIX: previously read ev.mitre_tactics, which is populated by
+        # normalizer.py's independent regex heuristics -- disconnected
+        # from the actual YAML rule engine that is really catching
+        # attacks. A chain could have A01/A02/A03 (real, severe rule
+        # matches) fire and still score 0 here if the normalizer's
+        # separate patterns didn't also happen to match. Now pulls
+        # tactics from chain.matched_rules, which is exactly what the
+        # rule engine matched and attached to the chain.
+        unique_tactics: Set[str] = {
+            t for rule in chain.matched_rules for t in rule.get("mitre_tactics", []) if t
+        }
+        tactic_count = len(unique_tactics)
+        if tactic_count >= 3:
+            tactics_score = 40.0
+        elif tactic_count == 2:
+            tactics_score = 25.0
+        elif tactic_count == 1:
+            tactics_score = 10.0
+        else:
+            tactics_score = 0.0
+
+        # 3. Decayed Risk Score Proportional Contribution (Max 20)
+        decayed_risk = self.risk_engine.get_chain_risk(chain.chain_id)
+        risk_score = min(20.0, decayed_risk * 0.4)
+
+        # 4. Behavioral Persistence (Duration) Contribution (Max 10)
+        duration = chain.last_updated - chain.created_at
+        persistence_score = 10.0 if duration > 10.0 else 0.0
+
+        # 5. Lineage/Rule Severity Anomaly Contribution (Max 10)
+        has_critical_rule = any(
+            r.get("severity") in ["high", "critical"] for r in chain.matched_rules
+        )
+        anomaly_score = 10.0 if has_critical_rule else 0.0
+
+        # 6. Configuration Drift Alignment Contribution (Max 10)
+        drift_active = False
+        if self.drift_detector:
+            try:
+                if hasattr(self.drift_detector, "is_drift_active"):
+                    drift_active = bool(self.drift_detector.is_drift_active())
+                elif hasattr(self.drift_detector, "drift_active"):
+                    drift_active = bool(self.drift_detector.drift_active)
+            except Exception as e:
+                logger.error(f"Error checking configuration drift status: {e}")
+
+        drift_score = 10.0 if drift_active else 0.0
+
+        raw_sum = sources_score + tactics_score + risk_score + persistence_score + anomaly_score + drift_score
+        confidence_score = min(100.0, raw_sum)
+
+        if confidence_score >= 95.0:
+            tier = "Critical"
+        elif confidence_score >= 80.0:
+            tier = "Confirmed"
+        elif confidence_score >= 60.0:
+            tier = "High"
+        elif confidence_score >= 40.0:
+            tier = "Suspicious"
+        else:
+            tier = "Monitor"
+
+        should_contain = confidence_score >= 80.0
+
+        result = {
+            "confidence_score": confidence_score,
+            "tier": tier,
+            "should_contain": should_contain,
+            "breakdown": {
+                "sources_score": sources_score,
+                "tactics_score": tactics_score,
+                "risk_score": risk_score,
+                "persistence_score": persistence_score,
+                "anomaly_score": anomaly_score,
+                "drift_score": drift_score
+            }
+        }
+
+        logger.info(f"Chain {chain.chain_id} calculated confidence: {confidence_score:.2f} ({tier}). Containment trigger: {should_contain}")
+        return result
+
+    # Method alias for backward compatibility and orchestrator compatibility
+    evaluate_chain = calculate_confidence

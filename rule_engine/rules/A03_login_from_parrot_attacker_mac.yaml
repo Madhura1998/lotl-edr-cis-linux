@@ -1,0 +1,23 @@
+id: A03
+name: Login from Parrot Attacker Machine
+severity: critical
+risk_score: 9
+mitre_tactics:
+- Initial Access
+mitre_techniques:
+- T1078
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: event_type
+    operator: equal
+    value: auth_session
+  - field: status
+    operator: equal
+    value: success
+  - field: src_ip
+    operator: equal
+    value: 192.168.112.137

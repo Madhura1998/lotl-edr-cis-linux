@@ -1,0 +1,324 @@
+const REFRESH_MS = 5000;
+
+let RULE_META = {};       // rule_id -> {name, tactics, techniques, severity}
+let LAST_CHAINS = [];      // cache so modal can look up full chain by id
+
+function tierClass(tier) { return "tier-" + (tier || "monitor").toLowerCase(); }
+function sevClass(sev) { return "sev-" + (sev || "normal").toLowerCase(); }
+function fmtTime(tsOrIso) {
+  let d;
+  if (typeof tsOrIso === "number") d = new Date(tsOrIso * 1000);
+  else d = new Date(tsOrIso);
+  if (isNaN(d.getTime())) return String(tsOrIso);
+  return d.toLocaleTimeString();
+}
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function fetchJSON(url, opts) {
+  try {
+    const res = await fetch(url, opts);
+    return await res.json();
+  } catch (e) {
+    console.error("fetch failed", url, e);
+    return null;
+  }
+}
+
+// ── MITRE lookup ────────────────────────────────────────────────
+function mitreForRules(ruleIds) {
+  if (!ruleIds || ruleIds.length === 0) return "-";
+  const seen = [];
+  for (const rid of ruleIds) {
+    const m = RULE_META[rid];
+    if (!m) continue;
+    const tactics = (m.tactics && m.tactics.length) ? m.tactics : ["?"];
+    const techniques = (m.techniques && m.techniques.length) ? m.techniques : ["?"];
+    for (const t of techniques) {
+      for (const tac of tactics) {
+        const pair = `${tac} / ${t}`;
+        if (!seen.includes(pair)) seen.push(pair);
+      }
+    }
+  }
+  if (seen.length === 0) return "-";
+  return seen.map(p => `<span class="mitre-chip">${escapeHtml(p)}</span>`).join("");
+}
+
+async function loadRuleMeta() {
+  const r = await fetchJSON("/api/rules");
+  if (r) RULE_META = r;
+}
+
+// ── Status / metrics ─────────────────────────────────────────────
+async function refreshStatus() {
+  const s = await fetchJSON("/api/status");
+  if (!s) return;
+  document.getElementById("hostname").textContent = s.hostname || "--";
+  document.getElementById("m-compliance").textContent = (s.compliance_percent ?? 0).toFixed(1) + "%";
+  document.getElementById("m-drift").textContent = (s.drift_percent ?? 0).toFixed(1) + "%";
+  document.getElementById("m-alerts").textContent = s.active_alerts_count ?? 0;
+
+  const sysPill = document.getElementById("pill-system");
+  document.getElementById("system-status").textContent = s.system_status || "--";
+  sysPill.className = "pill " + (s.system_status === "SECURED" ? "ok" : "bad");
+
+  const ledgerPill = document.getElementById("pill-ledger");
+  document.getElementById("ledger-status").textContent = s.ledger_status || "--";
+  ledgerPill.className = "pill " + (s.ledger_status === "INTEGRITY_VERIFIED" ? "ok" : "bad");
+}
+
+// ── Event counts chart (simple canvas bar chart) ─────────────────
+async function refreshCounts() {
+  const c = await fetchJSON("/api/event_counts");
+  if (!c) return;
+  document.getElementById("leg-normal").textContent = c.normal ?? 0;
+  document.getElementById("leg-suspicious").textContent = c.suspicious ?? 0;
+  document.getElementById("leg-attack").textContent = c.attack ?? 0;
+  drawCountsChart(c);
+}
+
+function drawCountsChart(counts) {
+  const canvas = document.getElementById("counts-chart");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const data = [
+    { label: "Normal", value: counts.normal || 0, color: "#33d17a" },
+    { label: "Suspicious", value: counts.suspicious || 0, color: "#e0a72e" },
+    { label: "Attack", value: counts.attack || 0, color: "#ff3b5c" },
+  ];
+  const maxVal = Math.max(1, ...data.map(d => d.value));
+  const barWidth = w / (data.length * 2);
+  const chartH = h - 40;
+
+  data.forEach((d, i) => {
+    const barH = (d.value / maxVal) * chartH;
+    const x = w / data.length * i + (w / data.length - barWidth) / 2;
+    const y = chartH - barH + 10;
+
+    ctx.fillStyle = d.color;
+    ctx.fillRect(x, y, barWidth, barH);
+
+    ctx.fillStyle = "#d8e1ea";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(d.value, x + barWidth / 2, y - 6);
+
+    ctx.fillStyle = "#7d8b9a";
+    ctx.font = "11px sans-serif";
+    ctx.fillText(d.label, x + barWidth / 2, chartH + 25);
+  });
+}
+
+// ── Attack chains ─────────────────────────────────────────────────
+function renderChainCard(c) {
+  const tier = (c.confidence_tier || "Monitor");
+  const pct = Math.min(100, c.confidence_score || 0);
+  const contain = c.should_contain ? `<div class="contain-flag">⚠ CONTAINMENT TRIGGERED</div>` : "";
+  return `
+    <div class="chain-card ${tierClass(tier)}" data-chain-id="${escapeHtml(c.chain_id)}">
+      <div class="chain-top">
+        <span class="chain-id">${escapeHtml((c.chain_id || "").slice(0, 8))}</span>
+        <span class="chain-tier">${escapeHtml(tier)}</span>
+      </div>
+      <div class="chain-meta">
+        <span>Score <b>${(c.confidence_score || 0).toFixed(1)}</b></span>
+        <span>Risk <b>${(c.risk_score || 0).toFixed(1)}</b></span>
+        <span>Events <b>${c.events_count || 0}</b></span>
+        <span>Duration <b>${(c.duration_seconds || 0).toFixed(0)}s</b></span>
+      </div>
+      <div class="chain-bar-bg"><div class="chain-bar-fill" style="width:${pct}%"></div></div>
+      ${contain}
+    </div>
+  `;
+}
+
+async function refreshChains() {
+  const chains = await fetchJSON("/api/chains");
+  LAST_CHAINS = chains || [];
+  const container = document.getElementById("chains-container");
+  if (!chains || chains.length === 0) {
+    container.innerHTML = `<div class="empty-state">No active chains</div>`;
+    updateTimeline([]);
+    return;
+  }
+  container.innerHTML = chains.map(renderChainCard).join("");
+  container.querySelectorAll(".chain-card").forEach(el => {
+    el.addEventListener("click", () => openChainModal(el.dataset.chainId));
+  });
+
+  const allEvents = [];
+  for (const c of chains) for (const ev of (c.events || [])) allEvents.push(ev);
+  updateTimeline(allEvents);
+}
+
+function updateTimeline(events) {
+  const body = document.getElementById("timeline-body");
+  const countEl = document.getElementById("timeline-count");
+  if (!events || events.length === 0) {
+    body.innerHTML = `<tr><td colspan="5" class="empty-state">No events yet</td></tr>`;
+    countEl.textContent = "";
+    return;
+  }
+  events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  countEl.textContent = `${events.length} events`;
+
+  body.innerHTML = events.slice(-100).reverse().map(ev => {
+    const sev = ev.highest_severity || "normal";
+    return `
+      <tr>
+        <td class="mono">${fmtTime(ev.timestamp)}</td>
+        <td>${escapeHtml(ev.username)}</td>
+        <td class="mono">${escapeHtml(ev.cmdline || ev.exe)}</td>
+        <td>${mitreForRules(ev.rules)}</td>
+        <td><span class="sev-tag ${sevClass(sev)}">${escapeHtml(sev)}</span></td>
+      </tr>
+    `;
+  }).join("");
+}
+
+// ── Chain detail modal (expand-to-full-page) ──────────────────────
+function renderTreeNode(node) {
+  if (!node || !node.pid) return "";
+  const statusClass = node.status === "active" ? "node-status-active" : "node-status-exited";
+  const children = (node.children || []).map(renderTreeNode).join("");
+  return `
+    <div class="tree-node">
+      <div class="node-line">
+        <span class="node-pid">PID ${escapeHtml(node.pid)}</span>
+        <span>${escapeHtml(node.name || node.exe)}</span>
+        <span class="${statusClass}">[${escapeHtml(node.status)}]</span>
+        <span class="mono">${escapeHtml(node.cmdline)}</span>
+      </div>
+      ${children ? `<div class="tree-children">${children}</div>` : ""}
+    </div>
+  `;
+}
+
+function openChainModal(chainId) {
+  const chain = LAST_CHAINS.find(c => c.chain_id === chainId);
+  if (!chain) return;
+
+  document.getElementById("modal-title").textContent = `Chain ${chainId.slice(0, 8)} — Full Detail`;
+
+  document.getElementById("modal-summary").innerHTML = `
+    <div class="s-item"><div class="s-label">Confidence Tier</div><div class="s-value">${escapeHtml(chain.confidence_tier)}</div></div>
+    <div class="s-item"><div class="s-label">Confidence Score</div><div class="s-value">${(chain.confidence_score || 0).toFixed(1)}</div></div>
+    <div class="s-item"><div class="s-label">Risk Score</div><div class="s-value">${(chain.risk_score || 0).toFixed(1)}</div></div>
+    <div class="s-item"><div class="s-label">Events</div><div class="s-value">${chain.events_count || 0}</div></div>
+    <div class="s-item"><div class="s-label">Duration</div><div class="s-value">${(chain.duration_seconds || 0).toFixed(0)}s</div></div>
+    <div class="s-item"><div class="s-label">Should Contain</div><div class="s-value">${chain.should_contain ? "YES" : "no"}</div></div>
+  `;
+
+  const treeEl = document.getElementById("modal-tree");
+  treeEl.innerHTML = (chain.process_tree && chain.process_tree.pid)
+    ? renderTreeNode(chain.process_tree)
+    : `<div class="empty-state">No process lineage available for this chain</div>`;
+
+  const events = (chain.events || []).slice().sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const evBody = document.getElementById("modal-events-body");
+  evBody.innerHTML = events.length ? events.map(ev => {
+    const sev = ev.highest_severity || "normal";
+    return `
+      <tr>
+        <td class="mono">${fmtTime(ev.timestamp)}</td>
+        <td>${escapeHtml(ev.source)}</td>
+        <td>${escapeHtml(ev.username)}</td>
+        <td class="mono">${escapeHtml(ev.cmdline || ev.exe)}</td>
+        <td>${mitreForRules(ev.rules)}</td>
+        <td><span class="sev-tag ${sevClass(sev)}">${escapeHtml(sev)}</span></td>
+      </tr>
+    `;
+  }).join("") : `<tr><td colspan="6" class="empty-state">No events</td></tr>`;
+
+  document.getElementById("chain-modal").classList.remove("hidden");
+}
+
+document.getElementById("modal-close").addEventListener("click", () => {
+  document.getElementById("chain-modal").classList.add("hidden");
+});
+document.getElementById("chain-modal").addEventListener("click", (e) => {
+  if (e.target.id === "chain-modal") e.target.classList.add("hidden");
+});
+
+// ── Drift ───────────────────────────────────────────────────────
+async function refreshDrift() {
+  const violations = await fetchJSON("/api/drift");
+  const container = document.getElementById("drift-container");
+  if (!violations || violations.length === 0) {
+    container.innerHTML = `<div class="empty-state">No drift violations</div>`;
+    return;
+  }
+  container.innerHTML = violations.map(v => `
+    <div class="drift-item ${escapeHtml((v.severity || "").toLowerCase())}">
+      <div class="drift-entity">${escapeHtml(v.entity)} — ${escapeHtml(v.drift_type)}</div>
+      <div class="drift-details">${escapeHtml(v.details)}</div>
+      <div class="drift-fix">${escapeHtml(v.recommended_remediation)}</div>
+    </div>
+  `).join("");
+}
+
+// ── Ledger + Containment ──────────────────────────────────────────
+async function refreshLedger() {
+  const ledger = await fetchJSON("/api/ledger");
+  const body = document.getElementById("ledger-body");
+  const containmentContainer = document.getElementById("containment-container");
+
+  if (!ledger || !ledger.blocks || ledger.blocks.length === 0) {
+    body.innerHTML = `<tr><td colspan="7" class="empty-state">No ledger entries</td></tr>`;
+    containmentContainer.innerHTML = `<div class="empty-state">No containment actions yet</div>`;
+    document.getElementById("m-incidents").textContent = 0;
+    return;
+  }
+
+  document.getElementById("m-incidents").textContent = ledger.blocks.length;
+
+  body.innerHTML = ledger.blocks.slice(-50).reverse().map(b => `
+    <tr>
+      <td class="mono">${escapeHtml((b.incident_id || "").slice(0, 8))}</td>
+      <td class="mono">${fmtTime(b.timestamp)}</td>
+      <td>${escapeHtml(b.user)}</td>
+      <td>${(b.mitre_tactics || []).map(t => `<span class="mitre-chip">${escapeHtml(t)}</span>`).join("")}</td>
+      <td>${(b.risk_score ?? 0).toFixed ? b.risk_score.toFixed(1) : b.risk_score}</td>
+      <td>${(b.containment_actions || []).join(", ") || "—"}</td>
+      <td class="hash-cell">${escapeHtml((b.current_hash || "").slice(0, 12))}...</td>
+    </tr>
+  `).join("");
+
+  // Dedicated containment box: only blocks that actually had actions
+  const contained = ledger.blocks.filter(b => (b.containment_actions || []).length > 0);
+  if (contained.length === 0) {
+    containmentContainer.innerHTML = `<div class="empty-state">No containment actions yet</div>`;
+  } else {
+    containmentContainer.innerHTML = contained.slice(-20).reverse().map(b => `
+      <div class="containment-item">
+        <div class="c-top">
+          <span class="c-user">${escapeHtml(b.user)}</span>
+          <span class="c-time">${fmtTime(b.timestamp)}</span>
+        </div>
+        <div>incident <span class="mono">${escapeHtml((b.incident_id || "").slice(0, 8))}</span> — risk ${(b.risk_score ?? 0).toFixed(1)}</div>
+        <div class="c-actions">${(b.containment_actions || []).map(a => `<span class="action-chip">${escapeHtml(a)}</span>`).join("")}</div>
+      </div>
+    `).join("");
+  }
+}
+
+document.getElementById("export-btn").addEventListener("click", () => {
+  window.open("/api/export", "_blank");
+});
+
+// ── Main refresh loop ─────────────────────────────────────────────
+async function refreshAll() {
+  await Promise.all([refreshStatus(), refreshCounts(), refreshChains(), refreshDrift(), refreshLedger()]);
+}
+
+(async function init() {
+  await loadRuleMeta();
+  await refreshAll();
+  setInterval(refreshAll, REFRESH_MS);
+  setInterval(loadRuleMeta, 60000); // rules rarely change, refresh occasionally
+})();

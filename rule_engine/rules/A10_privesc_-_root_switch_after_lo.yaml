@@ -1,0 +1,20 @@
+id: A10
+name: Privesc - Root Switch After Login
+severity: high
+risk_score: 7
+mitre_tactics:
+- Privilege Escalation
+mitre_techniques:
+- T1548.003
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: cmdline
+    operator: regex
+    value: ^(sudo|su)\b
+  - field: auth_success
+    operator: equal
+    value: true

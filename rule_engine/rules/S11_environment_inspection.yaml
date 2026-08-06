@@ -1,0 +1,17 @@
+id: S11
+name: Environment Inspection
+severity: low
+risk_score: 2
+mitre_tactics:
+- Discovery
+mitre_techniques:
+- T1082
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  any:
+  - field: cmdline
+    operator: regex
+    value: ^(env|printenv|set)\b

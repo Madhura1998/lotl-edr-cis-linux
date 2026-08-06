@@ -1,0 +1,17 @@
+id: S03
+name: Network Enumeration - Recon Step
+severity: low
+risk_score: 2
+mitre_tactics:
+- Discovery
+mitre_techniques:
+- T1049
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  any:
+  - field: cmdline
+    operator: regex
+    value: ^(netstat|ss|ifconfig|arp)\b

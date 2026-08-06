@@ -1,0 +1,17 @@
+id: A24
+name: Rapid Attack Chain - Commands Under 5 Seconds
+severity: high
+risk_score: 1
+mitre_tactics:
+- Execution
+mitre_techniques:
+- T1059
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: is_rapid_chain
+    operator: equal
+    value: true

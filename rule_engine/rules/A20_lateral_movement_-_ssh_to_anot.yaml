@@ -1,0 +1,24 @@
+id: A20
+name: Lateral Movement - SSH to Another Lab Host
+severity: high
+risk_score: 7
+mitre_tactics:
+- Lateral Movement
+mitre_techniques:
+- T1021.004
+nist_800_53:
+- AC-4
+- AC-3
+sox_itgc:
+- Access to Programs and Data
+conditions:
+  all:
+  - field: cmdline
+    operator: regex
+    value: ^ssh\b
+  - field: cmdline
+    operator: contains
+    value: '192.168.112.'
+  - field: uid
+    operator: gt
+    value: 0

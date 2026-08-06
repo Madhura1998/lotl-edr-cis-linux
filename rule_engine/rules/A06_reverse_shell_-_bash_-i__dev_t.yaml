@@ -1,0 +1,20 @@
+id: A06
+name: Reverse Shell - bash -i /dev/tcp
+severity: critical
+risk_score: 9
+mitre_tactics:
+- Execution
+mitre_techniques:
+- T1059.004
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  any:
+  - field: cmdline
+    operator: regex
+    value: bash\s+-i
+  - field: cmdline
+    operator: contains
+    value: /dev/tcp

@@ -1,0 +1,26 @@
+id: S07
+name: Privilege Escalation Attempt - Non-Admin
+severity: medium
+risk_score: 5
+mitre_tactics:
+- Privilege Escalation
+mitre_techniques:
+- T1548.003
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: cmdline
+    operator: regex
+    value: ^(sudo|su|pkexec)
+  - field: uid
+    operator: gt
+    value: 0
+  - field: auth_success
+    operator: equal
+    value: false
+  - field: auth_fail_count
+    operator: equal
+    value: 0

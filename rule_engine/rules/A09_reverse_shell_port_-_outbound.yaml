@@ -1,0 +1,25 @@
+id: A09
+name: Reverse Shell Port - Outbound
+severity: critical
+risk_score: 9
+mitre_tactics:
+- Command and Control
+mitre_techniques:
+- T1571
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: event_type
+    operator: equal
+    value: network_connect
+  - field: dst_port
+    operator: in
+    value:
+    - '4444'
+    - '9001'
+    - '5555'
+    - '6666'
+    - '31337'

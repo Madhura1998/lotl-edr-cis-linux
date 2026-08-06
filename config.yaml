@@ -1,0 +1,29 @@
+agent:
+  node_name: cs2-victim-192-168-112-158
+  log_level: INFO
+  output_json_path: /opt/cs2_edr/var/log/lotl_edr_telemetry.json
+collectors:
+  ebpf:
+    enabled: true
+    perf_page_cnt: 64
+  auditd:
+    enabled: true
+    log_path: /var/log/audit/audit.log
+  auth_log:
+    enabled: true
+    log_path: /var/log/auth.log
+  proc_fs:
+    enabled: true
+    scan_interval_sec: 5
+  network:
+    enabled: true
+    scan_interval_sec: 5
+network_context:
+  victim_ip: 192.168.112.158
+  attacker_ip: 192.168.112.137
+  revshell_ports:
+  - 4444
+  - 9001
+  - 5555
+  - 6666
+  - 31337

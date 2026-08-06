@@ -1,0 +1,20 @@
+id: A15
+name: Data Exfiltration - SCP or Upload
+severity: high
+risk_score: 8
+mitre_tactics:
+- Exfiltration
+mitre_techniques:
+- T1041
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: cmdline
+    operator: regex
+    value: ^(scp|rsync)\b
+  - field: has_privesc
+    operator: equal
+    value: true

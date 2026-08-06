@@ -1,0 +1,95 @@
+import time
+from typing import List, Dict, Any, Optional
+from lotl_edr.normalizer.schema import NormalizedEvent
+from lotl_edr.correlator.models import AttackChain
+from lotl_edr.utils.logger import setup_logger
+
+logger = setup_logger("correlator")
+
+class EventCorrelator:
+    def __init__(self, time_window_sec: float = 60.0):
+        self.time_window_sec = time_window_sec
+        self.active_chains: List[AttackChain] = []
+        self.archived_chains: List[AttackChain] = []
+
+    def process_event(self, event: NormalizedEvent, matched_rules: List[Dict[str, Any]]) -> AttackChain:
+        self._garbage_collect()
+
+        matched_chains: List[AttackChain] = []
+
+        for chain in self.active_chains:
+            if self._should_correlate(event, chain):
+                matched_chains.append(chain)
+
+        if not matched_chains:
+            new_chain = AttackChain()
+            new_chain.add_event(event, matched_rules)
+            self.active_chains.append(new_chain)
+            logger.info(f"Created new Attack Chain ({new_chain.chain_id}) for event {event.event_type} (PID {event.pid})")
+            return new_chain
+
+        elif len(matched_chains) == 1:
+            target_chain = matched_chains[0]
+            target_chain.add_event(event, matched_rules)
+            logger.info(f"Correlated event {event.event_type} (PID {event.pid}) into active Chain ({target_chain.chain_id})")
+            return target_chain
+
+        else:
+            primary_chain = matched_chains[0]
+            logger.info(f"Merging {len(matched_chains)} attack chains due to process convergence. Primary: {primary_chain.chain_id}")
+
+            for other_chain in matched_chains[1:]:
+                primary_chain.merge_with(other_chain)
+                if other_chain in self.active_chains:
+                    self.active_chains.remove(other_chain)
+
+            primary_chain.add_event(event, matched_rules)
+            logger.info(f"Correlated event {event.event_type} (PID {event.pid}) into merged Chain ({primary_chain.chain_id})")
+            return primary_chain
+
+    def _should_correlate(self, event: NormalizedEvent, chain: AttackChain) -> bool:
+        if time.time() - chain.last_updated > self.time_window_sec:
+            return False
+
+        if event.session_id is not None and event.session_id in chain.associated_sessions:
+            return True
+
+        if event.pid not in [0, 1] and event.pid in chain.associated_pids:
+            return True
+        if event.ppid not in [0, 1] and event.ppid in chain.associated_pids:
+            return True
+
+        # FIX: replaces the earlier ppid-sibling attempt, which didn't
+        # reliably catch commands run as independent children of the
+        # same shell (wget, base64, cat, python3 etc are siblings, not
+        # parent/child of each other) -- especially since eBPF never
+        # populates session_id/tty at all. This is the robust fallback:
+        # same username, recently active chain (within 20s) -> same
+        # chain. Matches how a real attacker session actually behaves
+        # (one user, rapid sequence of actions) without depending on
+        # any single collector's process-lineage fields being complete.
+        if (event.username and event.username in chain.associated_users
+                and (time.time() - chain.last_updated) <= 20.0):
+            return True
+
+        if event.dst_ip and event.dst_ip in chain.associated_ips:
+            return True
+        if event.src_ip and event.src_ip in chain.associated_ips:
+            return True
+
+        if event.tty and event.tty in chain.associated_ttys:
+            if event.username and event.username in chain.associated_users:
+                return True
+
+        return False
+
+    def _garbage_collect(self) -> None:
+        now = time.time()
+        active = []
+        for chain in self.active_chains:
+            if now - chain.last_updated > self.time_window_sec:
+                logger.info(f"Attack Chain {chain.chain_id} expired due to inactivity. Archiving.")
+                self.archived_chains.append(chain)
+            else:
+                active.append(chain)
+        self.active_chains = active

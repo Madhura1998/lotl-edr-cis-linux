@@ -1,0 +1,17 @@
+id: S04
+name: Port Scanning Tool
+severity: medium
+risk_score: 3
+mitre_tactics:
+- Discovery
+mitre_techniques:
+- T1046
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  any:
+  - field: cmdline
+    operator: regex
+    value: ^(nmap|masscan)\b

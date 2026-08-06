@@ -1,0 +1,23 @@
+id: A01
+name: SSH Brute Force High Volume
+severity: high
+risk_score: 8
+mitre_tactics:
+- Initial Access
+mitre_techniques:
+- T1110.001
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: event_type
+    operator: equal
+    value: auth_session
+  - field: status
+    operator: equal
+    value: failure
+  - field: auth_fail_count
+    operator: gte
+    value: 10

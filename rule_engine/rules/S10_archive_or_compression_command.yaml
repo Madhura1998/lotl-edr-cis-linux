@@ -1,0 +1,17 @@
+id: S10
+name: Archive or Compression Command
+severity: medium
+risk_score: 4
+mitre_tactics:
+- Collection
+mitre_techniques:
+- T1560
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  any:
+  - field: cmdline
+    operator: regex
+    value: ^(tar|zip|gzip|7z|rar)\b

@@ -1,0 +1,20 @@
+id: A25
+name: Bulk File Copy or Move - Large-Scale Staging
+severity: high
+risk_score: 7
+mitre_tactics:
+- Collection
+mitre_techniques:
+- T1074
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: cmdline
+    operator: regex
+    value: ^(cp|mv)\b
+  - field: cp_mv_window_count
+    operator: gt
+    value: 10

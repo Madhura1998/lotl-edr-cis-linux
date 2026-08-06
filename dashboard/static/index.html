@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CS2 LotL EDR — SOC Dashboard</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">CS2 <span>LotL EDR</span></div>
+  <div class="status-pills">
+    <div class="pill" id="pill-system"><span class="dot"></span><span id="system-status">--</span></div>
+    <div class="pill" id="pill-ledger"><span class="dot"></span><span id="ledger-status">--</span></div>
+    <div class="pill"><span id="hostname">--</span></div>
+  </div>
+</header>
+
+<main class="layout">
+
+  <section class="two-col-top">
+
+    <div class="card">
+      <div class="card-header"><h2>Event Volume</h2></div>
+      <canvas id="counts-chart" width="380" height="180"></canvas>
+      <div class="chart-legend">
+        <span><i class="sw normal"></i>Normal <b id="leg-normal">0</b></span>
+        <span><i class="sw suspicious"></i>Suspicious <b id="leg-suspicious">0</b></span>
+        <span><i class="sw attack"></i>Attack <b id="leg-attack">0</b></span>
+      </div>
+    </div>
+
+    <div class="card metrics-row">
+      <div class="metric"><div class="metric-value" id="m-compliance">--%</div><div class="metric-label">CIS Compliance</div></div>
+      <div class="metric"><div class="metric-value" id="m-drift">--%</div><div class="metric-label">Config Drift</div></div>
+      <div class="metric"><div class="metric-value" id="m-alerts">--</div><div class="metric-label">Active Chains</div></div>
+      <div class="metric"><div class="metric-value" id="m-incidents">--</div><div class="metric-label">Ledger Incidents</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2>System Load (Live)</h2></div>
+      <canvas id="sysload-chart" width="380" height="180"></canvas>
+      <div class="chart-legend">
+        <span><i class="sw normal"></i>CPU <b id="leg-cpu">0%</b></span>
+        <span><i class="sw attack"></i>Memory <b id="leg-mem">0%</b></span>
+      </div>
+    </div>
+
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2>Attack Chains</h2>
+      <span class="refresh-note">auto-refresh 5s — click a chain for full lineage</span>
+    </div>
+    <div id="chains-container" class="chains-container">
+      <div class="empty-state">No active chains</div>
+    </div>
+  </section>
+
+  <section class="two-col">
+    <div class="card">
+      <div class="card-header">
+        <h2>Attack Timeline</h2>
+        <span class="refresh-note" id="timeline-count"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="timeline-table">
+          <thead>
+            <tr><th>Date / Time</th><th>User</th><th>Command</th><th>Rule(s)</th><th>MITRE Tactic / Technique</th><th>Sev</th></tr>
+          </thead>
+          <tbody id="timeline-body">
+            <tr><td colspan="6" class="empty-state">No events yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h2>Containment Actions</h2></div>
+      <div id="containment-container" class="containment-container">
+        <div class="empty-state">No containment actions yet</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2>Configuration Drift</h2>
+    </div>
+    <div id="drift-container" class="drift-container">
+      <div class="empty-state">No drift violations</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2>GRC Evidence Ledger</h2>
+      <button id="export-btn" class="btn-export">Export Report</button>
+    </div>
+    <div class="table-wrap">
+      <table class="ledger-table">
+        <thead>
+          <tr><th>Incident</th><th>Date / Timestamp</th><th>User</th><th>Rule(s)</th><th>MITRE Tactics</th><th>Risk Score</th><th>Containment Actions</th><th>Hash</th></tr>
+        </thead>
+        <tbody id="ledger-body">
+          <tr><td colspan="8" class="empty-state">No ledger entries</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<!-- Full-page chain detail overlay -->
+<div id="chain-modal" class="modal-overlay hidden">
+  <div class="modal-page">
+    <div class="modal-header">
+      <h2 id="modal-title">Chain Detail</h2>
+      <button id="modal-close" class="btn-close">✕ Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-section">
+        <h3>Summary</h3>
+        <div id="modal-summary" class="modal-summary-grid"></div>
+      </div>
+      <div class="modal-section">
+        <h3>Process Lineage</h3>
+        <div id="modal-tree" class="process-tree"></div>
+      </div>
+      <div class="modal-section">
+        <h3>Full Event Timeline</h3>
+        <div class="table-wrap">
+          <table class="timeline-table">
+            <thead>
+              <tr><th>Time</th><th>Source</th><th>User</th><th>Command</th><th>MITRE Tactic / Technique</th><th>Sev</th></tr>
+            </thead>
+            <tbody id="modal-events-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

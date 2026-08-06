@@ -1,0 +1,20 @@
+id: S13
+name: Permission Probing - Privilege Recon
+severity: medium
+risk_score: 3
+mitre_tactics:
+- Discovery
+mitre_techniques:
+- T1083
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: cmdline
+    operator: startswith
+    value: ls
+  - field: cmdline
+    operator: regex
+    value: (/root|/etc/shadow|/etc/sudoers)

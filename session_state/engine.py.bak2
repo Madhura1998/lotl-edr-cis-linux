@@ -1,0 +1,133 @@
+import time
+import re
+from typing import Dict, Any, Optional
+from lotl_edr.utils.logger import setup_logger
+
+logger = setup_logger("session_state")
+
+RECON_CMD_PATTERN = re.compile(r"^(who|w|last|lastlog|ps|pstree|netstat|ss|ifconfig|arp)\b")
+PRIVESC_CMD_PATTERN = re.compile(r"^(sudo|su|pkexec)\b")
+DOWNLOAD_CMD_PATTERN = re.compile(r"^(wget|curl)\b")
+CREDFILE_PATTERN = re.compile(r"(/etc/shadow|/etc/sudoers|authorized_keys)")
+CP_MV_PATTERN = re.compile(r"^(cp|mv)\b")
+
+CP_MV_WINDOW_SEC = 30
+RAPID_CHAIN_WINDOW_SEC = 5
+RECON_BURST_WINDOW_SEC = 60
+
+
+class SessionState:
+    """Per-session mutable state, mirroring the bash detector's `sess` dict."""
+
+    def __init__(self, session_key: str):
+        self.session_key = session_key
+        self.auth_fail_count = 0
+        self.auth_success = False
+        self.has_privesc = False
+        self.has_download = False
+        self.has_cred = False
+        self.last_attack_ts: Optional[float] = None
+        self.attack_event_count = 0
+        self.recon_timestamps = []
+        self.cp_mv_timestamps = []
+        self.created_at = time.time()
+        self.last_updated = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        now = time.time()
+        recent_recon = [t for t in self.recon_timestamps if now - t <= RECON_BURST_WINDOW_SEC]
+        recent_cp_mv = [t for t in self.cp_mv_timestamps if now - t <= CP_MV_WINDOW_SEC]
+        rapid = (
+            self.last_attack_ts is not None
+            and (now - self.last_attack_ts) <= RAPID_CHAIN_WINDOW_SEC
+            and self.attack_event_count >= 2
+        )
+        return {
+            "auth_fail_count": self.auth_fail_count,
+            "auth_success": self.auth_success,
+            "has_privesc": self.has_privesc,
+            "has_download": self.has_download,
+            "has_cred": self.has_cred,
+            "attack_event_count": self.attack_event_count,
+            "recon_burst_count": len(recent_recon),
+            "cp_mv_window_count": len(recent_cp_mv),
+            "is_rapid_chain": rapid,
+        }
+
+
+class SessionStateEngine:
+    """
+    Tracks session state keyed by (session_id or username-fallback).
+    Call `update()` AFTER rule matching so newly-matched rules can update
+    state for the NEXT event, and call `get_context()` BEFORE rule matching
+    so the current event can see prior state.
+    """
+
+    def __init__(self, idle_timeout_sec: float = 1800.0):
+        self.sessions: Dict[str, SessionState] = {}
+        self.idle_timeout_sec = idle_timeout_sec
+
+    def _key_for(self, event) -> str:
+        if event.session_id is not None:
+            return f"sess_{event.session_id}"
+        if event.username and event.username != "unknown":
+            return f"user_{event.username}"
+        return f"pid_{event.pid}"
+
+    def get_context(self, event) -> Dict[str, Any]:
+        self._gc()
+        key = self._key_for(event)
+        if key not in self.sessions:
+            self.sessions[key] = SessionState(key)
+        s = self.sessions[key]
+
+        # FIX: auth_fail_count must include the CURRENT event if it is
+        # itself a failure, otherwise count-threshold rules (S14, A01)
+        # are always one event behind reality and can miss the exact
+        # attempt that should have tripped them.
+        ctx = s.to_dict()
+        if event.event_type == "auth_session" and event.raw_data.get("status") == "failure":
+            ctx["auth_fail_count"] = s.auth_fail_count + 1
+        return ctx
+
+    def update(self, event, matched_rules: list) -> None:
+        key = self._key_for(event)
+        if key not in self.sessions:
+            self.sessions[key] = SessionState(key)
+        s = self.sessions[key]
+        s.last_updated = time.time()
+
+        cmdline = (event.cmdline or "").strip()
+
+        if event.event_type == "auth_session":
+            status = event.raw_data.get("status")
+            if status == "failure":
+                s.auth_fail_count += 1
+            elif status == "success":
+                s.auth_success = True
+
+        if PRIVESC_CMD_PATTERN.search(cmdline):
+            s.has_privesc = True
+        if DOWNLOAD_CMD_PATTERN.search(cmdline):
+            s.has_download = True
+        if CREDFILE_PATTERN.search(cmdline):
+            s.has_cred = True
+
+        if RECON_CMD_PATTERN.search(cmdline):
+            s.recon_timestamps.append(time.time())
+            s.recon_timestamps = s.recon_timestamps[-20:]
+
+        if CP_MV_PATTERN.search(cmdline):
+            s.cp_mv_timestamps.append(time.time())
+            s.cp_mv_timestamps = s.cp_mv_timestamps[-50:]
+
+        has_attack_rule = any(r.get("severity") in ("high", "critical") for r in matched_rules)
+        if has_attack_rule:
+            s.last_attack_ts = time.time()
+            s.attack_event_count += 1
+
+    def _gc(self) -> None:
+        now = time.time()
+        expired = [k for k, s in self.sessions.items() if now - s.last_updated > self.idle_timeout_sec]
+        for k in expired:
+            del self.sessions[k]

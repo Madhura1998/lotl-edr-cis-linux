@@ -1,0 +1,23 @@
+id: A18
+name: Disable Security Tools
+severity: high
+risk_score: 7
+mitre_tactics:
+- Defense Evasion
+mitre_techniques:
+- T1562.001
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: cmdline
+    operator: regex
+    value: ^(systemctl|service)\b
+  - field: cmdline
+    operator: contains
+    value: stop
+  - field: cmdline
+    operator: regex
+    value: (auditd|fail2ban|apparmor)

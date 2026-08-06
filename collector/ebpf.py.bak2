@@ -1,0 +1,241 @@
+path = "/opt/cs2_edr/lotl_edr/collector/ebpf.py"
+content = open(path).read()
+
+old_program = '''EBPF_PROGRAM = """
+#include <uapi/linux/ptrace.h>
+#include <linux/sched.h>
+#include <linux/fs.h>
+#include <uapi/linux/limits.h>
+
+struct data_t {
+    u32 pid;
+    u32 ppid;
+    u32 uid;
+    u32 gid;
+    char comm[TASK_COMM_LEN];
+    char exe[128];
+    char details[256];
+    u32 event_type; // 1: execve, 2: connect, 3: ptrace, 4: unlink, 5: privilege_escalation
+};
+
+BPF_PERF_OUTPUT(events);
+
+// 1. Trace execve
+TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
+    struct data_t data = {};
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    data.pid = pid_tgid >> 32;
+
+    // Get parent PID
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    data.ppid = task->real_parent->tgid;
+
+    u64 uid_gid = bpf_get_current_uid_gid();
+    data.uid = uid_gid;
+    data.gid = uid_gid >> 32;
+
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+
+    // Read target executable path
+    bpf_probe_read_user_str(&data.exe, sizeof(data.exe), args->filename);
+
+    data.event_type = 1;
+    events.perf_submit(args, &data, sizeof(data));
+    return 0;
+}
+
+// 2. Trace connect (outbound sockets)
+TRACEPOINT_PROBE(syscalls, sys_enter_connect) {
+    struct data_t data = {};
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    data.pid = pid_tgid >> 32;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    data.ppid = task->real_parent->tgid;
+
+    u64 uid_gid = bpf_get_current_uid_gid();
+    data.uid = uid_gid;
+
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    data.event_type = 2;
+
+    // Safely parse socket address (IPv4)
+    struct sockaddr *addr = (struct sockaddr *)args->uservaddr;
+    if (addr) {
+        short family = 0;
+        bpf_probe_read_kernel(&family, sizeof(family), &addr->sa_family);
+        if (family == AF_INET) {
+            struct sockaddr_in *addr_in = (struct sockaddr_in *)addr;
+            u32 ip = 0;
+            u16 port = 0;
+            bpf_probe_read_kernel(&ip, sizeof(ip), &addr_in->sin_addr.s_addr);
+            bpf_probe_read_kernel(&port, sizeof(port), &addr_in->sin_port);
+
+            // Format IP and Port into details string
+            // ip is network byte order
+            unsigned char bytes[4];
+            bytes[0] = ip & 0xFF;
+            bytes[1] = (ip >> 8) & 0xFF;
+            bytes[2] = (ip >> 16) & 0xFF;
+            bytes[3] = (ip >> 24) & 0xFF;
+
+            // Store as string: e.g. "10.0.0.5:4444"
+            // Note: port needs ntohs conversion (byte swap)
+            u16 port_hs = ((port >> 8) & 0xFF) | ((port & 0xFF) << 8);
+
+            // Unsafe sprintf is not allowed in eBPF, simple manual format or assignment:
+            // Since complex strings are hard in eBPF, we pass raw IP bytes in details or just write it.
+            // Let's pass IP representation
+            data.details[0] = bytes[0];
+            data.details[1] = bytes[1];
+            data.details[2] = bytes[2];
+            data.details[3] = bytes[3];
+            data.details[4] = (port_hs >> 8) & 0xFF;
+            data.details[5] = port_hs & 0xFF;
+        }
+    }
+
+    events.perf_submit(args, &data, sizeof(data));
+    return 0;
+}
+
+// 3. Trace unlink (file deletion)
+KPROBE_PROBE(do_unlinkat) {
+    struct data_t data = {};
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    data.pid = pid_tgid >> 32;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    data.ppid = task->real_parent->tgid;
+
+    u64 uid_gid = bpf_get_current_uid_gid();
+    data.uid = uid_gid;
+
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    data.event_type = 4;
+
+    // In newer kernels, filename is in struct filename *name.
+    // To make compiling robust, we just register that unlink happened.
+    events.perf_submit(ctx, &data, sizeof(data));
+    return 0;
+}
+"""'''
+
+new_program = '''EBPF_PROGRAM = """
+#include <uapi/linux/ptrace.h>
+#include <linux/sched.h>
+#include <linux/fs.h>
+#include <linux/in.h>
+#include <uapi/linux/limits.h>
+
+struct data_t {
+    u32 pid;
+    u32 ppid;
+    u32 uid;
+    u32 gid;
+    char comm[TASK_COMM_LEN];
+    char exe[128];
+    char details[256];
+    u32 event_type; // 1: execve, 2: connect, 3: ptrace, 4: unlink, 5: privilege_escalation
+};
+
+BPF_PERF_OUTPUT(events);
+
+// 1. Trace execve
+TRACEPOINT_PROBE(syscalls, sys_enter_execve) {
+    struct data_t data = {};
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    data.pid = pid_tgid >> 32;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    data.ppid = task->real_parent->tgid;
+
+    u64 uid_gid = bpf_get_current_uid_gid();
+    data.uid = uid_gid;
+    data.gid = uid_gid >> 32;
+
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    bpf_probe_read_user_str(&data.exe, sizeof(data.exe), args->filename);
+
+    data.event_type = 1;
+    events.perf_submit(args, &data, sizeof(data));
+    return 0;
+}
+
+// 2. Trace connect (outbound sockets)
+// FIX: original code declared `struct sockaddr *addr` from a raw user
+// pointer and dereferenced sa_family/sin_addr/sin_port directly, which
+// fails to compile because BCC only has forward declarations of
+// sockaddr/sockaddr_in in this context (incomplete type). Fixed by
+// reading the whole struct into a local BPF-stack copy with
+// bpf_probe_read_user first, then working off that local copy -- the
+// standard BCC pattern for reading user-space socket addresses.
+TRACEPOINT_PROBE(syscalls, sys_enter_connect) {
+    struct data_t data = {};
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    data.pid = pid_tgid >> 32;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    data.ppid = task->real_parent->tgid;
+
+    u64 uid_gid = bpf_get_current_uid_gid();
+    data.uid = uid_gid;
+
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    data.event_type = 2;
+
+    struct sockaddr_in addr_in = {};
+    bpf_probe_read_user(&addr_in, sizeof(addr_in), (void *)args->uservaddr);
+
+    if (addr_in.sin_family == AF_INET) {
+        u32 ip = addr_in.sin_addr.s_addr;
+        u16 port = addr_in.sin_port;
+
+        unsigned char bytes[4];
+        bytes[0] = ip & 0xFF;
+        bytes[1] = (ip >> 8) & 0xFF;
+        bytes[2] = (ip >> 16) & 0xFF;
+        bytes[3] = (ip >> 24) & 0xFF;
+
+        u16 port_hs = ((port >> 8) & 0xFF) | ((port & 0xFF) << 8);
+
+        data.details[0] = bytes[0];
+        data.details[1] = bytes[1];
+        data.details[2] = bytes[2];
+        data.details[3] = bytes[3];
+        data.details[4] = (port_hs >> 8) & 0xFF;
+        data.details[5] = port_hs & 0xFF;
+    }
+
+    events.perf_submit(args, &data, sizeof(data));
+    return 0;
+}
+
+// 3. Trace unlink (file deletion)
+// FIX: KPROBE_PROBE is not a real BCC macro. The correct convention for
+// a kprobe attached by function name is a plain function named
+// kprobe__<kernel_function_name>, which BCC auto-attaches and which
+// receives struct pt_regs *ctx as its first argument automatically.
+int kprobe__do_unlinkat(struct pt_regs *ctx) {
+    struct data_t data = {};
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    data.pid = pid_tgid >> 32;
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    data.ppid = task->real_parent->tgid;
+
+    u64 uid_gid = bpf_get_current_uid_gid();
+    data.uid = uid_gid;
+
+    bpf_get_current_comm(&data.comm, sizeof(data.comm));
+    data.event_type = 4;
+
+    events.perf_submit(ctx, &data, sizeof(data));
+    return 0;
+}
+"""'''
+
+assert old_program in content, "EBPF_PROGRAM block not found - check for whitespace differences"
+content = content.replace(old_program, new_program)
+open(path, "w").write(content)
+print("Patched ebpf.py successfully")

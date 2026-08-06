@@ -1,0 +1,17 @@
+id: S06
+name: Download Tool - External Download
+severity: medium
+risk_score: 3
+mitre_tactics:
+- Command and Control
+mitre_techniques:
+- T1105
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  any:
+  - field: cmdline
+    operator: regex
+    value: ^(wget|curl)\b

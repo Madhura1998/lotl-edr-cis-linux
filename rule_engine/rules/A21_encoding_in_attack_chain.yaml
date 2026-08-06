@@ -1,0 +1,17 @@
+id: A21
+name: Encoding in Attack Chain
+severity: high
+risk_score: 7
+mitre_tactics:
+- Defense Evasion
+mitre_techniques:
+- T1027
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  any:
+  - field: cmdline
+    operator: regex
+    value: ^(base64|xxd|openssl)\b

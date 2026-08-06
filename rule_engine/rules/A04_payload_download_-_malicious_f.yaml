@@ -1,0 +1,20 @@
+id: A04
+name: Payload Download - Malicious File
+severity: high
+risk_score: 7
+mitre_tactics:
+- Command and Control
+mitre_techniques:
+- T1105
+nist_800_53:
+- SI-4
+sox_itgc:
+- ITGC-SEC-01
+conditions:
+  all:
+  - field: cmdline
+    operator: regex
+    value: ^(wget|curl)
+  - field: cmdline
+    operator: contains
+    value: '192.168.112.137'
