@@ -34,7 +34,6 @@ Key Capabilities
  Architecture
 
 
-
                 CIS-Hardened Ubuntu Host
 
                             |
@@ -43,14 +42,17 @@ Key Capabilities
 
        |          |          |          |          |
 
+  
    auditd    auth.log    /proc       eBPF     Network
+
 
      |          |          |          |          |
 
      +----------+----------+----------+----------+
+
                             |
 
-                  +--------v--------+
+                   +--------v--------+
 
                   | Event Normalizer|
 
@@ -60,7 +62,7 @@ Key Capabilities
 
                    +--------v--------+
 
-                 |   Rule Engine   |
+                   |   Rule Engine   |
 
                    |  YAML Detection |
 
@@ -74,7 +76,7 @@ Key Capabilities
 
                    | + Correlator    |
 
-                  +--------+--------+
+                   +--------+--------+
 
                             |
                    +--------v--------+
@@ -87,9 +89,9 @@ Key Capabilities
 
                              |
 
-           +----------------+----------------+
+            +----------------+----------------+
 
-           |                |                |
+            |                |                |
 
             v                v                v
 
@@ -102,15 +104,15 @@ Key Capabilities
 
                              |
 
-                   +--------v--------+
+                    +--------v--------+
 
-                    | CIS Drift       |
+                    |   CIS Drift      |
 
-                    | Detection       |
+                    |   Detection      |
 
                     +--------+--------+
 
-                            |
+                             |
 
                     +--------v--------+
 
@@ -125,36 +127,42 @@ Telemetry Collection
 
 The framework collects telemetry from five complementary sources.
 
-1. auditd
+1. auditd: 
 Linux audit events are collected to provide visibility into process execution, file access, and other security-relevant system activity.
 
-2. Authentication Logs
+2. Authentication Logs: 
 Authentication and privilege-related events are collected from Linux authentication logs, including SSH and sudo activity.
 
-3. /proc
+3. /proc : 
 The /proc filesystem is used to obtain process-level information such as:
 Running processes
+
 Command lines
+
 Process ownership
+
 Process relationships
+
 Session information
+
 Active terminals
 
-4. eBPF
+4. eBPF: 
 The eBPF collector provides kernel-level runtime visibility using BCC-based tracing.
 The framework monitors activities including:
 execve
 connect
 File deletion activity
 
-5. Network
+5. Network:
 Network telemetry is collected from Linux socket information and associated with processes to provide visibility into suspicious outbound and inbound activity.
 
-Event Normalization
+Event Normalization:
 Events collected from different telemetry sources are converted into a common normalized event structure.
 Normalization allows events from auditd, authentication logs, /proc, eBPF, and network monitoring to be processed consistently by the detection and correlation components.
 
 Detection Engine
+
 Detection rules are stored as YAML files under:
 rule\_engine/rules/
 The rules are organized into two categories.
@@ -177,7 +185,7 @@ Data staging
 Rapid attack chains
 Bulk file operations
 
-Suspicious / Reconnaissance Rules
+Suspicious / Reconnaissance Rules"
 The repository also contains rules for behaviors including:
 User enumeration
 Process discovery
@@ -227,7 +235,7 @@ Existing risk score
 Attack-chain length
 Detection-rule severity
 
-CIS configuration drift
+CIS configuration drift:
 
 The confidence score ranges from 0 to 100.
 Automated Containment
