@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Backup/development copies
+*.bak
+*.bak*
+*.backup
+
+# IDE/editor files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+*.log
+logs/
+runtime/
+
+# Generated evidence and forensic output
+forensics_output/
+evidence/
+*.tar.gz
+
+# Runtime JSON/JSONL data
+*.jsonl
+
+# Environment/secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Python coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Local test output
+results/runtime/
