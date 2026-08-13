@@ -43,7 +43,7 @@ Key Capabilities
        |          |          |          |          |
 
   
-   auditd    auth.log    /proc       eBPF     Network
+      auditd    auth.log    /proc       eBPF     Network
 
 
      |          |          |          |          |
